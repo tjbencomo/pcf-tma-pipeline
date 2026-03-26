@@ -261,6 +261,13 @@ Logs are written to `logs/pcf-pipeline_<jobid>.out` and `.err`.
 micromamba run -n pcf-pipeline pcf-pipeline run --config my_dataset.yaml
 ```
 
+To save logs while still seeing output in the terminal:
+
+```bash
+mkdir -p logs
+micromamba run -n pcf-pipeline pcf-pipeline run --config my_dataset.yaml 2>&1 | tee logs/pcf-pipeline_$(date +%Y%m%d_%H%M%S).log
+```
+
 ### Individual steps
 
 Run a single step by name — useful for re-running a failed step or testing:

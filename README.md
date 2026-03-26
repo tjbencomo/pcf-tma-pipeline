@@ -174,6 +174,7 @@ Runs [Nimbus](https://github.com/angelolab/Nimbus-Inference) deep-learning infer
 
 Combines all data sources into a single [AnnData](https://anndata.readthedocs.io) object:
 
+- **`X`** — same as `layers['intensities']` (QuPath fluorescence intensities); provided as the default matrix for compatibility with standard AnnData workflows
 - **`layers['intensities']`** — QuPath `Cell: <marker>: Mean` fluorescence intensities for all channels (cells × channels)
 - **`layers['nimbus_probabilities']`** — Nimbus marker probability scores (cells × channels; `NaN` for channels excluded from inference)
 - **`obs`** — per-cell metadata: `cell_id` (QuPath UUID), `core`, `mask_label`, `centroid_x_um`, `centroid_y_um`, `cell_area_um2`, plus binary `<marker>_positive` columns at the configured threshold

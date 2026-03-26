@@ -31,6 +31,9 @@ venv/
 # Claude Code
 .claude/
 
+# Jupyter
+.ipynb_checkpoints/
+
 # Editor
 .vscode/
 .idea/

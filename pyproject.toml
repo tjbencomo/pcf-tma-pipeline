@@ -21,9 +21,12 @@ dev = ["ruff", "pytest"]
 [project.scripts]
 pcf-pipeline = "pcf_pipeline.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["pcf_pipeline*"]
+
 [build-system]
 requires = ["setuptools>=64"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 line-length = 100

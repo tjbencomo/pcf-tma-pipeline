@@ -1,0 +1,59 @@
+# PCF Pipeline Configuration
+# Copy this file and edit paths for your dataset.
+
+dataset_id: "MCC_51p_TMA_A1B1"
+
+# --- Input files (all required) ---
+inputs:
+  image: "path/to/image.er.qptiff"           # PCF image (qptiff or multi-channel tiff)
+  cores_geojson: "path/to/cores.geojson"      # TMA core polygon segmentations
+  cells_geojson: "path/to/cells.geojson"      # Cell/nuclei segmentation geojson
+  measurements_csv: "path/to/measurements.csv" # QuPath single-cell fluorescence CSV
+  channel_names_json: null                     # Optional; auto-extracted from qptiff if null
+
+# --- Output directory ---
+output_dir: "/path/to/output"
+
+# --- Step 1: Segmentation masks ---
+# Provide pre-generated paths to skip mask generation
+masks:
+  cell_mask_path: null
+  nucleus_mask_path: null
+  id_mapping_path: null
+
+# --- Step 2: Core splitting ---
+cores:
+  padding: 100          # Pixels of padding around each core bounding box
+  square: true          # Use square bounding boxes (centered on core)
+  skip_missing: true    # Skip cores marked as isMissing in geojson
+  compression: "zlib"   # TIFF compression for output: zlib, lzw, or null
+
+# --- Step 3: FOV creation ---
+fovs:
+  tile_size: 1024       # FOV height and width in pixels
+  overlap: 128          # Overlap between adjacent FOVs
+  remove_offset: null   # Subtract a pixel offset (e.g. 100), or null to skip
+
+# --- Step 4: Nimbus inference ---
+nimbus:
+  exclude_channels:     # Channels to exclude from Nimbus (non-marker channels)
+    - "DAPI"
+    - "BX010_750"
+    - "T55"
+    - "T60"
+  batch_size: 4
+  test_time_aug: true
+  input_shape: [1024, 1024]
+  device: "auto"        # "auto", "cuda", "cpu", or "mps"
+  normalization_quantile: 0.999
+  normalization_n_subset: 400
+  normalization_clip: [0, 2]
+
+# --- Step 5: Merge into AnnData ---
+merge:
+  positivity_threshold: 0.5  # Nimbus probability threshold for binary marker positivity
+
+# --- Pipeline behavior ---
+pipeline:
+  skip_completed: true       # Skip steps whose outputs already exist
+  steps: [1, 2, 3, 4, 5]    # Which steps to run (for selective execution)

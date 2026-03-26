@@ -1,0 +1,39 @@
+# Large data directories
+test-data/
+development-data/
+Nimbus/
+
+# Reference/scratch files
+original-code/
+CLAUDE.md
+project-setup.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Logs and temp outputs
+logs/
+*.out
+*.err
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Claude Code
+.claude/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store

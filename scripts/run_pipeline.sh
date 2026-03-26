@@ -10,15 +10,15 @@
 #SBATCH --job-name=pcf-pipeline
 #SBATCH --output=logs/pcf-pipeline_%j.out
 #SBATCH --error=logs/pcf-pipeline_%j.err
-#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=256G
-#SBATCH --partition=gpu
 #SBATCH --gpus=1
 
 set -euo pipefail
+
+source $HOME/.bashrc
 
 # ---------------------------------------------------------------------------
 # Argument handling

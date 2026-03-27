@@ -11,6 +11,11 @@ import pandas as pd
 from pcf_pipeline import log
 from pcf_pipeline.config import PipelineConfig
 
+# Matches QuPath marker intensity columns: "Compartment: Marker: Stat"
+_INTENSITY_COL_RE = re.compile(
+    r"^(Nucleus|Cytoplasm|Membrane|Cell): .+: (Mean|Median|Min|Max|Std\.Dev\.)$"
+)
+
 
 # ---------------------------------------------------------------------------
 # Loaders
@@ -96,7 +101,7 @@ def _load_qupath(
     for col in df.columns:
         if col in already_handled:
             continue
-        if any(orig in col for orig in channel_names):
+        if _INTENSITY_COL_RE.match(col):
             continue
         safe_col = _sanitize_col_name(col)
         extra_metadata[col] = safe_col

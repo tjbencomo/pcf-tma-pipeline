@@ -56,6 +56,11 @@ def _make_qupath_csv(n: int, channels_orig: list[str]) -> pd.DataFrame:
     }
     for ch in channels_orig:
         rows[f"Cell: {ch}: Mean"] = rng.uniform(0, 5000, n).astype(np.float32)
+    # Add non-Cell compartment intensity columns (should be excluded from .obs)
+    for ch in channels_orig:
+        rows[f"Nucleus: {ch}: Mean"] = rng.uniform(0, 5000, n).astype(np.float32)
+        rows[f"Cytoplasm: {ch}: Median"] = rng.uniform(0, 5000, n).astype(np.float32)
+        rows[f"Membrane: {ch}: Std.Dev."] = rng.uniform(0, 5000, n).astype(np.float32)
     return pd.DataFrame(rows)
 
 
@@ -288,6 +293,54 @@ def test_run_step5_anndata_structure(synthetic_config):
     assert (adata.obs["dataset"] == "test_ds").all()
     # extra QuPath metadata columns
     assert any("nucleus" in c for c in adata.obs.columns)
+
+
+def test_run_step5_no_intensity_leakage(synthetic_config):
+    """Non-Cell compartment intensity columns must NOT appear in .obs."""
+    adata = run_step5(synthetic_config)
+    obs_cols = set(adata.obs.columns)
+    for col in obs_cols:
+        # Sanitized intensity cols would look like nucleus_cd3e_mean, cytoplasm_cd8_median, etc.
+        assert not any(
+            col.startswith(f"{comp}_") and col.endswith(("_mean", "_median", "_std_dev"))
+            and any(ch.lower() in col for ch in CHANNELS_ORIG)
+            for comp in ("nucleus", "cytoplasm", "membrane")
+        ), f"Intensity column '{col}' leaked into .obs"
+
+
+def test_load_qupath_excludes_non_cell_intensity():
+    """_load_qupath filters out Nucleus/Cytoplasm/Membrane intensity columns."""
+    # Use channels with hyphens to test the former substring-match bug
+    channels_orig = ["IDO-1", "CD3e"]
+    channels_safe = ["IDO-1", "CD3e"]
+    rng = np.random.default_rng(0)
+    n = 5
+    rows = {
+        "Object ID": [f"uuid-{i}" for i in range(1, n + 1)],
+        "TMA Core": [CORE] * n,
+        "Centroid X µm": rng.uniform(0, 1000, n),
+        "Centroid Y µm": rng.uniform(0, 1000, n),
+        "Cell: Area µm^2": rng.uniform(50, 200, n),
+        "Nucleus: Area µm^2": rng.uniform(20, 100, n),
+        "Nucleus: Circularity": rng.uniform(0.5, 1.0, n),
+    }
+    for ch in channels_orig:
+        rows[f"Cell: {ch}: Mean"] = rng.uniform(0, 5000, n).astype(np.float32)
+        rows[f"Nucleus: {ch}: Mean"] = rng.uniform(0, 5000, n).astype(np.float32)
+        rows[f"Cytoplasm: {ch}: Median"] = rng.uniform(0, 5000, n).astype(np.float32)
+    df = pd.DataFrame(rows)
+    csv_path = Path("/tmp/_test_qupath_intensity_filter.csv")
+    df.to_csv(csv_path, index=False)
+
+    result, channels, extra_cols = _load_qupath(csv_path, channels_orig, channels_safe)
+    # Morphological columns should be present
+    assert "nucleus_area_m_2" in extra_cols
+    assert "nucleus_circularity" in extra_cols
+    # Intensity columns from non-Cell compartments should NOT be present
+    assert "nucleus_ido_1_mean" not in result.columns
+    assert "nucleus_cd3e_mean" not in result.columns
+    assert "cytoplasm_ido_1_median" not in result.columns
+    assert "cytoplasm_cd3e_median" not in result.columns
 
 
 def test_run_step5_missing_id_mapping_raises(tmp_path):

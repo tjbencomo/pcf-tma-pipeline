@@ -51,6 +51,8 @@ def _make_qupath_csv(n: int, channels_orig: list[str]) -> pd.DataFrame:
         "Centroid X µm": rng.uniform(0, 1000, n),
         "Centroid Y µm": rng.uniform(0, 1000, n),
         "Cell: Area µm^2": rng.uniform(50, 200, n),
+        "Nucleus: Area µm^2": rng.uniform(20, 100, n),
+        "Nucleus: Circularity": rng.uniform(0.5, 1.0, n),
     }
     for ch in channels_orig:
         rows[f"Cell: {ch}: Mean"] = rng.uniform(0, 5000, n).astype(np.float32)
@@ -75,9 +77,18 @@ def _make_nimbus_parquet(n: int, markers: list[str], core: str) -> pd.DataFrame:
 def _make_core_metadata(channels_safe: list[str], core: str) -> dict:
     return {
         "channel_names": channels_safe,
-        "cores": [{"core_name": core, "core_id": "feat-1",
-                   "min_x": 0, "min_y": 0, "max_x": 500, "max_y": 500,
-                   "width": 500, "height": 500}],
+        "cores": [
+            {
+                "core_name": core,
+                "core_id": "feat-1",
+                "min_x": 0,
+                "min_y": 0,
+                "max_x": 500,
+                "max_y": 500,
+                "width": 500,
+                "height": 500,
+            }
+        ],
     }
 
 
@@ -96,7 +107,9 @@ def synthetic_config(tmp_path):
 
     # Write channel_names.json
     ch_json = tmp_path / "channel_names.json"
-    ch_json.write_text(json.dumps({"channel_names": CHANNELS_ORIG, "channel_names_safe": CHANNELS_SAFE}))
+    ch_json.write_text(
+        json.dumps({"channel_names": CHANNELS_ORIG, "channel_names_safe": CHANNELS_SAFE})
+    )
 
     # Write Nimbus parquet
     nimbus_df = _make_nimbus_parquet(N_CELLS, MARKERS_NIMBUS, CORE)
@@ -146,38 +159,45 @@ def test_load_qupath_returns_correct_channels():
     csv_path = Path("/tmp/_test_qupath.csv")
     df.to_csv(csv_path, index=False)
 
-    result, channels = _load_qupath(csv_path, CHANNELS_ORIG, CHANNELS_SAFE)
+    result, channels, extra_cols = _load_qupath(csv_path, CHANNELS_ORIG, CHANNELS_SAFE)
     assert set(channels) == set(CHANNELS_SAFE)
     assert "core" in result.columns
     for ch in CHANNELS_SAFE:
         assert ch in result.columns
+    # Extra morphological columns should be captured
+    assert len(extra_cols) >= 2
+    assert "nucleus_area_m_2" in extra_cols or any("nucleus" in c for c in extra_cols)
 
 
 def test_build_anndata_shape():
     """_build_anndata produces correct obs × var shape."""
     rng = np.random.default_rng(0)
     n = 8
-    merged = pd.DataFrame({
-        "object_id": [f"uuid-{i}" for i in range(n)],
-        "core": [CORE] * n,
-        "label": range(1, n + 1),
-        "centroid_x_um": rng.uniform(0, 100, n),
-        "centroid_y_um": rng.uniform(0, 100, n),
-        "cell_area_um2": rng.uniform(50, 200, n),
-        "CD3e": rng.uniform(0, 1, n),
-        "CD8": rng.uniform(0, 1, n),
-        "DAPI": rng.uniform(0, 5000, n),
-    })
+    merged = pd.DataFrame(
+        {
+            "object_id": [f"uuid-{i}" for i in range(n)],
+            "core": [CORE] * n,
+            "label": range(1, n + 1),
+            "centroid_x_um": rng.uniform(0, 100, n),
+            "centroid_y_um": rng.uniform(0, 100, n),
+            "cell_area_um2": rng.uniform(50, 200, n),
+            "CD3e": rng.uniform(0, 1, n),
+            "CD8": rng.uniform(0, 1, n),
+            "DAPI": rng.uniform(0, 5000, n),
+        }
+    )
     adata = _build_anndata(
         merged=merged,
         intensity_channels=["DAPI", "CD3e", "CD8"],
         nimbus_channels=["CD3e", "CD8"],
         all_channels=["DAPI", "CD3e", "CD8"],
         threshold=0.5,
+        dataset_id="test_ds",
+        extra_obs_cols=[],
     )
     assert adata.n_obs == n
     assert adata.n_vars == 3
-    assert "intensities" in adata.layers
+    assert "raw_intensity" in adata.layers
     assert "nimbus_probabilities" in adata.layers
 
 
@@ -187,21 +207,25 @@ def test_build_anndata_positivity_columns():
     n = 20
     probs = rng.uniform(0, 1, n).astype(np.float32)
     # _build_anndata expects Nimbus probs under "_prob_<ch>" (post-merge rename)
-    merged = pd.DataFrame({
-        "object_id": [f"uuid-{i}" for i in range(n)],
-        "core": [CORE] * n,
-        "label": range(1, n + 1),
-        "centroid_x_um": np.zeros(n),
-        "centroid_y_um": np.zeros(n),
-        "cell_area_um2": np.ones(n),
-        "_prob_CD3e": probs,
-    })
+    merged = pd.DataFrame(
+        {
+            "object_id": [f"uuid-{i}" for i in range(n)],
+            "core": [CORE] * n,
+            "label": range(1, n + 1),
+            "centroid_x_um": np.zeros(n),
+            "centroid_y_um": np.zeros(n),
+            "cell_area_um2": np.ones(n),
+            "_prob_CD3e": probs,
+        }
+    )
     adata = _build_anndata(
         merged=merged,
         intensity_channels=[],
         nimbus_channels=["CD3e"],
         all_channels=["CD3e"],
         threshold=0.5,
+        dataset_id="test_ds",
+        extra_obs_cols=[],
     )
     expected = probs >= 0.5
     np.testing.assert_array_equal(adata.obs["CD3e_positive"].values, expected)
@@ -210,23 +234,27 @@ def test_build_anndata_positivity_columns():
 def test_build_anndata_nimbus_nan_for_excluded():
     """Channels not in nimbus_channels have NaN in the nimbus_probabilities layer."""
     n = 5
-    merged = pd.DataFrame({
-        "object_id": [f"uuid-{i}" for i in range(n)],
-        "core": [CORE] * n,
-        "label": range(1, n + 1),
-        "centroid_x_um": np.zeros(n),
-        "centroid_y_um": np.zeros(n),
-        "cell_area_um2": np.ones(n),
-        "DAPI": np.full(n, 1000.0),       # intensity column (no prefix)
-        "CD3e": np.full(n, 800.0),         # intensity column (no prefix)
-        "_prob_CD3e": np.full(n, 0.8),    # Nimbus prob column (prefixed)
-    })
+    merged = pd.DataFrame(
+        {
+            "object_id": [f"uuid-{i}" for i in range(n)],
+            "core": [CORE] * n,
+            "label": range(1, n + 1),
+            "centroid_x_um": np.zeros(n),
+            "centroid_y_um": np.zeros(n),
+            "cell_area_um2": np.ones(n),
+            "DAPI": np.full(n, 1000.0),  # intensity column (no prefix)
+            "CD3e": np.full(n, 800.0),  # intensity column (no prefix)
+            "_prob_CD3e": np.full(n, 0.8),  # Nimbus prob column (prefixed)
+        }
+    )
     adata = _build_anndata(
         merged=merged,
         intensity_channels=["DAPI", "CD3e"],
-        nimbus_channels=["CD3e"],       # DAPI excluded from Nimbus
+        nimbus_channels=["CD3e"],  # DAPI excluded from Nimbus
         all_channels=["DAPI", "CD3e"],
         threshold=0.5,
+        dataset_id="test_ds",
+        extra_obs_cols=[],
     )
     dapi_idx = list(adata.var.index).index("DAPI")
     cd3e_idx = list(adata.var.index).index("CD3e")
@@ -245,14 +273,21 @@ def test_run_step5_creates_h5ad(synthetic_config):
 def test_run_step5_anndata_structure(synthetic_config):
     """Output AnnData has expected layers and obs columns."""
     adata = run_step5(synthetic_config)
-    assert "intensities" in adata.layers
+    assert "raw_intensity" in adata.layers
     assert "nimbus_probabilities" in adata.layers
     assert adata.n_obs == N_CELLS
     assert adata.n_vars == len(CHANNELS_SAFE)
     # Binary positivity columns for Nimbus markers
     for marker in MARKERS_NIMBUS:
-        assert f"{marker}_positive" in adata.obs.columns, \
-            f"Missing positivity column for {marker}"
+        assert f"{marker}_positive" in adata.obs.columns, f"Missing positivity column for {marker}"
+    # spatial obsm
+    assert "spatial" in adata.obsm
+    assert adata.obsm["spatial"].shape == (N_CELLS, 2)
+    # dataset column
+    assert "dataset" in adata.obs.columns
+    assert (adata.obs["dataset"] == "test_ds").all()
+    # extra QuPath metadata columns
+    assert any("nucleus" in c for c in adata.obs.columns)
 
 
 def test_run_step5_missing_id_mapping_raises(tmp_path):

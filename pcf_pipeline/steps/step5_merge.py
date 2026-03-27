@@ -1,6 +1,7 @@
 """Step 5: Merge Nimbus predictions with QuPath measurements into AnnData."""
 
 import json
+import re
 from pathlib import Path
 
 import anndata as ad
@@ -23,18 +24,29 @@ def _load_id_mapping(id_mapping_path: Path) -> pd.DataFrame:
     return df
 
 
+def _sanitize_col_name(name: str) -> str:
+    """Convert an arbitrary column name to a safe, lowercase identifier."""
+    s = name.lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = s.strip("_")
+    return s
+
+
 def _load_qupath(
     csv_path: Path, channel_names: list[str], safe_names: list[str]
-) -> tuple[pd.DataFrame, list[str]]:
+) -> tuple[pd.DataFrame, list[str], list[str]]:
     """Load QuPath CSV and extract per-cell intensity measurements.
 
     Returns
     -------
     qupath_df : DataFrame indexed by Object ID with columns:
         core, centroid_x_um, centroid_y_um, cell_area_um2,
-        and one column per safe channel name (Cell mean intensities).
+        one column per safe channel name (Cell mean intensities),
+        and any extra morphological/structural metadata columns.
     intensity_channels : list of safe channel names that had a matching
         Cell Mean column in the CSV.
+    extra_metadata_cols : list of sanitized names for extra metadata columns
+        preserved from the CSV (non-marker, non-standard columns).
     """
     df = pd.read_csv(csv_path, dtype={"Object ID": str})
     log.info(f"Loaded QuPath CSV: {len(df)} rows, {len(df.columns)} columns")
@@ -62,13 +74,39 @@ def _load_qupath(
     out["core"] = df["TMA Core"].values
     out["centroid_x_um"] = df["Centroid X µm"].values
     out["centroid_y_um"] = df["Centroid Y µm"].values
-    out["cell_area_um2"] = df["Cell: Area µm^2"].values if "Cell: Area µm^2" in df.columns else np.nan
+    out["cell_area_um2"] = (
+        df["Cell: Area µm^2"].values if "Cell: Area µm^2" in df.columns else np.nan
+    )
 
     for orig_col, safe_name in intensity_cols.items():
         out[safe_name] = df[orig_col].values
 
     intensity_channels = list(intensity_cols.values())
-    return out, intensity_channels
+
+    # Collect extra morphological/structural metadata columns
+    already_handled = {
+        "Object ID",
+        "TMA Core",
+        "Centroid X µm",
+        "Centroid Y µm",
+        "Cell: Area µm^2",
+        *intensity_cols.keys(),
+    }
+    extra_metadata: dict[str, str] = {}
+    for col in df.columns:
+        if col in already_handled:
+            continue
+        if any(orig in col for orig in channel_names):
+            continue
+        safe_col = _sanitize_col_name(col)
+        extra_metadata[col] = safe_col
+        out[safe_col] = df[col].values
+
+    if extra_metadata:
+        log.info(f"Preserved {len(extra_metadata)} extra QuPath metadata columns in obs")
+
+    extra_metadata_cols = list(extra_metadata.values())
+    return out, intensity_channels, extra_metadata_cols
 
 
 def _load_nimbus_parquets(fovs_dir: Path, core_names: list[str]) -> pd.DataFrame:
@@ -87,9 +125,7 @@ def _load_nimbus_parquets(fovs_dir: Path, core_names: list[str]) -> pd.DataFrame
         dfs.append(df)
 
     if not dfs:
-        raise FileNotFoundError(
-            f"No Nimbus parquet files found in {fovs_dir} — run Step 4 first"
-        )
+        raise FileNotFoundError(f"No Nimbus parquet files found in {fovs_dir} — run Step 4 first")
 
     combined = pd.concat(dfs, ignore_index=True)
     log.info(f"Loaded Nimbus parquets: {len(combined)} rows across {len(dfs)} cores")
@@ -117,8 +153,18 @@ def _merge_all(
 
     # Rename Nimbus probability columns to avoid collisions with QuPath intensity columns
     meta_cols = {
-        "label", "centroid_y", "centroid_x", "ymin", "xmin", "ymax", "xmax",
-        "assigned_fov_id", "assigned_fov_index", "fully_contained", "fov", "core",
+        "label",
+        "centroid_y",
+        "centroid_x",
+        "ymin",
+        "xmin",
+        "ymax",
+        "xmax",
+        "assigned_fov_id",
+        "assigned_fov_index",
+        "fully_contained",
+        "fov",
+        "core",
         "object_id",
     }
     prob_cols = [c for c in merged.columns if c not in meta_cols]
@@ -145,6 +191,8 @@ def _build_anndata(
     nimbus_channels: list[str],
     all_channels: list[str],
     threshold: float,
+    dataset_id: str,
+    extra_obs_cols: list[str],
 ) -> ad.AnnData:
     """Construct AnnData from the merged per-cell DataFrame.
 
@@ -155,12 +203,14 @@ def _build_anndata(
     nimbus_channels : safe channel names present in Nimbus parquets
     all_channels : union (ordered) of all safe channel names for var index
     threshold : positivity threshold applied to Nimbus probabilities
+    dataset_id : dataset identifier added as obs["dataset"]
+    extra_obs_cols : sanitized names of extra QuPath metadata columns to include in obs
     """
     n_cells = len(merged)
     n_vars = len(all_channels)
     var_index = pd.Index(all_channels, name="channel")
 
-    # Intensities layer (QuPath Cell Mean) — NaN for channels not in CSV
+    # raw_intensity layer (QuPath Cell Mean) — NaN for channels not in CSV
     intensity_matrix = np.full((n_cells, n_vars), np.nan, dtype=np.float32)
     for i, ch in enumerate(all_channels):
         if ch in intensity_channels and ch in merged.columns:
@@ -175,10 +225,20 @@ def _build_anndata(
             nimbus_matrix[:, i] = merged[prob_col].values.astype(np.float32)
 
     # obs: cell metadata
-    obs_cols = ["object_id", "core", "label", "centroid_x_um", "centroid_y_um", "cell_area_um2"]
-    obs = merged[[c for c in obs_cols if c in merged.columns]].copy()
+    base_obs_cols = [
+        "object_id",
+        "core",
+        "label",
+        "centroid_x_um",
+        "centroid_y_um",
+        "cell_area_um2",
+    ]
+    all_obs_cols = base_obs_cols + [c for c in extra_obs_cols if c not in base_obs_cols]
+    obs = merged[[c for c in all_obs_cols if c in merged.columns]].copy()
     obs = obs.set_index("object_id")
     obs.index.name = "cell_id"
+
+    obs["dataset"] = dataset_id
 
     # Binary positivity columns for Nimbus channels
     for ch in nimbus_channels:
@@ -191,10 +251,16 @@ def _build_anndata(
         obs=obs,
         var=pd.DataFrame(index=var_index),
         layers={
-            "intensities": intensity_matrix,
+            "raw_intensity": intensity_matrix,
             "nimbus_probabilities": nimbus_matrix,
         },
     )
+    adata.obsm["spatial"] = np.column_stack(
+        [
+            obs["centroid_x_um"].values,
+            obs["centroid_y_um"].values,
+        ]
+    ).astype(np.float64)
     return adata
 
 
@@ -239,21 +305,33 @@ def run_step5(config: PipelineConfig) -> ad.AnnData:
     else:
         # Fall back: reverse the safe transformation (best-effort)
         original_names = [s.replace("_", " ").replace("-", "/") for s in safe_names]
-        log.warning("channel_names_json not provided — using approximate original names for QuPath join")
+        log.warning(
+            "channel_names_json not provided — using approximate original names for QuPath join"
+        )
 
     log.info(f"Processing {len(core_names)} cores, {len(safe_names)} channels")
 
     # Load data
     id_mapping = _load_id_mapping(config.masks.id_mapping_path)
-    qupath_df, intensity_channels = _load_qupath(
+    qupath_df, intensity_channels, extra_metadata_cols = _load_qupath(
         config.inputs.measurements_csv, original_names, safe_names
     )
     nimbus_df = _load_nimbus_parquets(config.fovs_dir, core_names)
 
     # Identify Nimbus probability columns (marker names only, before any renaming)
     _meta_cols = {
-        "label", "centroid_y", "centroid_x", "ymin", "xmin", "ymax", "xmax",
-        "assigned_fov_id", "assigned_fov_index", "fully_contained", "fov", "core",
+        "label",
+        "centroid_y",
+        "centroid_x",
+        "ymin",
+        "xmin",
+        "ymax",
+        "xmax",
+        "assigned_fov_id",
+        "assigned_fov_index",
+        "fully_contained",
+        "fov",
+        "core",
     }
     nimbus_channels = [c for c in nimbus_df.columns if c not in _meta_cols]
     log.info(f"Nimbus probability columns: {len(nimbus_channels)}")
@@ -270,6 +348,8 @@ def run_step5(config: PipelineConfig) -> ad.AnnData:
         nimbus_channels=nimbus_channels,
         all_channels=safe_names,
         threshold=config.merge.positivity_threshold,
+        dataset_id=config.dataset_id,
+        extra_obs_cols=extra_metadata_cols,
     )
     log.info(
         f"AnnData: {adata.n_obs} cells × {adata.n_vars} channels, "

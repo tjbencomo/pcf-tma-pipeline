@@ -343,6 +343,69 @@ def test_load_qupath_excludes_non_cell_intensity():
     assert "cytoplasm_cd3e_median" not in result.columns
 
 
+def test_run_step5_hyphen_channels_no_channel_names_json(tmp_path):
+    """Regression: hyphen-bearing markers must populate raw_intensity even when
+    channel_names_json is null. Previously the fallback string-reversal in
+    step5 corrupted the originals (Pan-Cytokeratin → Pan/Cytokeratin), missing
+    the QuPath columns and leaving those channels NaN. Originals are now read
+    from core_metadata.json (or the qptiff)."""
+    channels_orig = ["DAPI", "CD3e", "Pan-Cytokeratin", "IDO-1", "HLA-DR", "Bcl-2"]
+    channels_safe = channels_orig  # safe transform is identity for these names
+    markers_nimbus = [c for c in channels_orig if c != "DAPI"]
+
+    id_map = _make_id_mapping(N_CELLS)
+    id_map_path = tmp_path / "id_mapping.csv"
+    id_map.to_csv(id_map_path, index=False)
+
+    qupath_df = _make_qupath_csv(N_CELLS, channels_orig)
+    csv_path = tmp_path / "measurements.csv"
+    qupath_df.to_csv(csv_path, index=False)
+
+    nimbus_df = _make_nimbus_parquet(N_CELLS, markers_nimbus, CORE)
+    dataset_dir = tmp_path / "out" / "test_ds"
+    nimbus_out = dataset_dir / "fovs" / CORE / "nimbus_output"
+    nimbus_out.mkdir(parents=True)
+    nimbus_df.to_parquet(nimbus_out / f"{CORE}_nimbus_cell_predicted_probs.parquet")
+
+    sample_images_dir = dataset_dir / "sample-images"
+    sample_images_dir.mkdir(parents=True)
+    meta = _make_core_metadata(channels_safe, CORE)
+    # Step 2 now persists originals here; step 5 must read them.
+    meta["original_channel_names"] = channels_orig
+    (sample_images_dir / "core_metadata.json").write_text(json.dumps(meta))
+
+    image_path = tmp_path / "image.tiff"
+    image_path.write_bytes(b"")
+    cores_geojson = tmp_path / "cores.geojson"
+    cores_geojson.write_text("{}")
+    cells_geojson = tmp_path / "cells.geojson"
+    cells_geojson.write_text("{}")
+
+    config = PipelineConfig(
+        dataset_id="test_ds",
+        inputs=InputsConfig(
+            image=image_path,
+            cores_geojson=cores_geojson,
+            cells_geojson=cells_geojson,
+            measurements_csv=csv_path,
+            channel_names_json=None,  # the previously-buggy path
+        ),
+        output_dir=tmp_path / "out",
+        masks=MasksConfig(id_mapping_path=id_map_path),
+        merge=MergeConfig(positivity_threshold=0.5),
+        pipeline=PipelineRunConfig(skip_completed=False),
+    )
+
+    adata = run_step5(config)
+    raw = adata.layers["raw_intensity"]
+    for ch in ("Pan-Cytokeratin", "IDO-1", "HLA-DR", "Bcl-2"):
+        idx = list(adata.var.index).index(ch)
+        col = raw[:, idx]
+        assert not np.any(np.isnan(col)), (
+            f"raw_intensity for {ch} is NaN — channel-name reversal regression"
+        )
+
+
 def test_run_step5_missing_id_mapping_raises(tmp_path):
     """run_step5 raises ValueError when id_mapping_path is not configured."""
     config = PipelineConfig(

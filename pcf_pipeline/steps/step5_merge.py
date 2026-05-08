@@ -10,6 +10,7 @@ import pandas as pd
 
 from pcf_pipeline import log
 from pcf_pipeline.config import PipelineConfig
+from pcf_pipeline.utils import get_channel_info
 
 # Matches QuPath marker intensity columns: "Compartment: Marker: Stat"
 _INTENSITY_COL_RE = re.compile(
@@ -302,17 +303,33 @@ def run_step5(config: PipelineConfig) -> ad.AnnData:
     core_records: list[dict] = meta["cores"]
     core_names = [r["core_name"] for r in core_records]
 
-    # Recover original channel names from channel_names_json if available
+    # Recover original channel names. The safe-name transform is non-invertible
+    # (both spaces→"_" and slashes→"-" lose information about hyphens), so we
+    # never try to string-reverse it. Sources in priority order:
+    #   1. channel_names_json (explicit user-provided)
+    #   2. original_channel_names persisted in core_metadata.json by Step 2
+    #   3. re-read from the qptiff via get_channel_info
     if config.inputs.channel_names_json and config.inputs.channel_names_json.exists():
         with open(config.inputs.channel_names_json) as f:
             raw = json.load(f)
         original_names = raw["channel_names"] if isinstance(raw, dict) else raw
+    elif "original_channel_names" in meta:
+        original_names = meta["original_channel_names"]
+        log.info("Using original channel names from core_metadata.json")
     else:
-        # Fall back: reverse the safe transformation (best-effort)
-        original_names = [s.replace("_", " ").replace("-", "/") for s in safe_names]
-        log.warning(
-            "channel_names_json not provided — using approximate original names for QuPath join"
+        # Older runs predate persistence of originals — re-read from the qptiff.
+        log.info(
+            "original_channel_names not found in core_metadata.json — "
+            "re-reading from qptiff for QuPath join"
         )
+        original_names, _, _, _ = get_channel_info(config.inputs.image)
+        if not original_names:
+            raise ValueError(
+                "Could not recover original channel names: channel_names_json not "
+                "set, core_metadata.json lacks 'original_channel_names', and the "
+                "input image is not a qptiff with biomarker metadata. Provide "
+                "channel_names_json or re-run Step 2."
+            )
 
     log.info(f"Processing {len(core_names)} cores, {len(safe_names)} channels")
 

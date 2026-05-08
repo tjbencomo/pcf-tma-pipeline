@@ -260,7 +260,11 @@ def run_step2(config: PipelineConfig) -> None:
 
     with open(meta_path, "w") as f:
         json.dump(
-            {"channel_names": safe_names, "cores": list(all_records.values())},
+            {
+                "channel_names": safe_names,
+                "original_channel_names": channel_names,
+                "cores": list(all_records.values()),
+            },
             f,
             indent=2,
         )
